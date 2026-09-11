@@ -91,13 +91,42 @@ class OrderDatabase:
             ))
             conn.commit()
 
-    def mark_applied(self, order_id: str):
+    def mark_applied(self, order_id: str, proposal_message: Optional[str] = None):
         """Отметить, что на заказ был отправлен отклик."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            if proposal_message:
+                cursor.execute("""
+                    UPDATE orders
+                    SET status = 'APPLIED', proposal_message = ?, applied_at = CURRENT_TIMESTAMP
+                    WHERE id = ?;
+                """, (proposal_message, order_id))
+            else:
+                cursor.execute("""
+                    UPDATE orders
+                    SET status = 'APPLIED', applied_at = CURRENT_TIMESTAMP
+                    WHERE id = ?;
+                """, (order_id,))
+            conn.commit()
+
+    def mark_rejected_manual(self, order_id: str):
+        """Отметить, что заказ был отклонен пользователем в Telegram."""
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
                 UPDATE orders
-                SET status = 'APPLIED', applied_at = CURRENT_TIMESTAMP
+                SET status = 'REJECTED_MANUAL', llm_reason = 'Отклонен пользователем в Telegram'
+                WHERE id = ?;
+            """, (order_id,))
+            conn.commit()
+
+    def mark_expired(self, order_id: str):
+        """Отметить, что истекло время ожидания решения (таймаут)."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                UPDATE orders
+                SET status = 'EXPIRED_TIMEOUT', llm_reason = 'Истекло время ожидания решения в Telegram'
                 WHERE id = ?;
             """, (order_id,))
             conn.commit()

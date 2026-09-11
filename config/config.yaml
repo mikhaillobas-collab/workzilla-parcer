@@ -29,3 +29,7 @@ delays:
 
 database:
   path: "data/workzilla.db"
+
+telegram:
+  # Время ожидания решения по заказу в минутах (по истечении кнопки убираются, заказ пропускается)
+  order_timeout_minutes: 15

@@ -28,6 +28,7 @@ class WorkzillaBrowserClient:
         self.context: Optional[BrowserContext] = None
         self.page: Optional[Page] = None
         self._is_connected = False
+        self.lock = asyncio.Lock()
 
     async def start(self) -> bool:
         """Инициализация браузера и подключение к сессии."""
@@ -131,151 +132,184 @@ class WorkzillaBrowserClient:
         """Проверка вкладки 'Новые' выполняется только один раз при старте."""
         pass
 
+    async def _ensure_element(self, order: WorkzillaOrder) -> bool:
+        """Проверяет, привязан ли order.raw_element к DOM. Если нет — ищет его заново по заголовку."""
+        if not self.page:
+            return False
+        if order.raw_element:
+            try:
+                if await order.raw_element.is_visible():
+                    return True
+            except Exception:
+                pass
+
+        try:
+            cards = await self.page.query_selector_all(
+                ".order-card, .vacancy-item, [data-order-id], [class*='order_card'], [class*='OrderItem'], [class*='order-item'], [class*='taskItem'], [class*='vacancyItem']"
+            )
+            clean_title = order.title.strip()[:25]
+            for c in cards:
+                try:
+                    txt = await c.inner_text()
+                    if clean_title and clean_title in txt:
+                        order.raw_element = c
+                        return True
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        return False
+
     async def fetch_orders(self) -> List[WorkzillaOrder]:
         """Парсинг карточек новых заказов из ленты /freelancer."""
         if not self.page:
             return []
 
-        orders: List[WorkzillaOrder] = []
-        seen_titles = set()
-        seen_ids = set()
+        async with self.lock:
+            orders: List[WorkzillaOrder] = []
+            seen_titles = set()
+            seen_ids = set()
 
-        try:
-            # 1. Поиск карточек заказов по стандартным классам Workzilla
-            card_elements = await self.page.query_selector_all(
-                ".order-card, .vacancy-item, [data-order-id], [class*='order_card'], [class*='OrderItem'], [class*='order-item'], [class*='taskItem'], [class*='vacancyItem']"
-            )
+            try:
+                # 1. Поиск карточек заказов по стандартным классам Workzilla
+                card_elements = await self.page.query_selector_all(
+                    ".order-card, .vacancy-item, [data-order-id], [class*='order_card'], [class*='OrderItem'], [class*='order-item'], [class*='taskItem'], [class*='vacancyItem']"
+                )
 
-            # 2. Если по классам не найдено — ищем по чекбоксам на карточках
-            if not card_elements:
-                checkboxes = await self.page.query_selector_all("input[type='checkbox'], [role='checkbox'], [class*='checkbox']")
-                for cb in checkboxes:
-                    try:
-                        is_select_all = await cb.evaluate("""el => {
-                            const p = el.closest('div') || el.parentElement;
-                            return p && p.innerText && p.innerText.includes('Выбрать всё');
-                        }""")
-                        if is_select_all:
+                # 2. Если по классам не найдено — ищем по чекбоксам на карточках
+                if not card_elements:
+                    checkboxes = await self.page.query_selector_all("input[type='checkbox'], [role='checkbox'], [class*='checkbox']")
+                    for cb in checkboxes:
+                        try:
+                            is_select_all = await cb.evaluate("""el => {
+                                const p = el.closest('div') || el.parentElement;
+                                return p && p.innerText && p.innerText.includes('Выбрать всё');
+                            }""")
+                            if is_select_all:
+                                continue
+                            card_h = await cb.evaluate_handle("""el => {
+                                return el.closest('[class*=\"item\"], [class*=\"card\"], [class*=\"order\"], [class*=\"vacancy\"], article, li') || el.parentElement.parentElement;
+                            }""")
+                            el = card_h.as_element()
+                            if el and el not in card_elements:
+                                card_elements.append(el)
+                        except Exception:
                             continue
-                        card_h = await cb.evaluate_handle("""el => {
-                            return el.closest('[class*=\"item\"], [class*=\"card\"], [class*=\"order\"], [class*=\"vacancy\"], article, li') || el.parentElement.parentElement;
-                        }""")
-                        el = card_h.as_element()
-                        if el and el not in card_elements:
-                            card_elements.append(el)
-                    except Exception:
+
+                for card_el in card_elements:
+                    try:
+                        raw_text = await card_el.inner_text()
+                        text_clean = raw_text.replace("\xa0", " ").replace("&nbsp;", " ")
+                        lines = [l.strip() for l in text_clean.split("\n") if l.strip()]
+
+                        # Пропускаем заголовки секций "Интересные задания" и "Новые задания"
+                        if not lines or lines[0] in ("Интересные задания", "Новые задания", "Выбрать всё"):
+                            continue
+
+                        title = lines[0]
+                        # Дедупликация вложенных родительских блоков
+                        if title in seen_titles:
+                            continue
+                        seen_titles.add(title)
+
+                        description = "\n".join(lines[1:]) if len(lines) > 1 else ""
+
+                        # Поиск ID заказа
+                        order_id = await card_el.get_attribute("data-order-id") or await card_el.get_attribute("id")
+                        if not order_id:
+                            link_el = await card_el.query_selector("a[href*='/order/'], a[href*='/task/'], a[href*='/vacancy/']")
+                            if link_el:
+                                href = await link_el.get_attribute("href") or ""
+                                m = re.search(r"/(?:order|task|vacancy)/([0-9a-zA-Z_-]+)", href)
+                                if m:
+                                    order_id = m.group(1)
+
+                        # Парсинг цены (число рядом с таймером '6ч 0м 1000' или отдельная строка числа)
+                        price = 0.0
+                        price_match = re.search(r'(?:(?:\d+\s*[дd]\s*)?(?:\d+\s*[чh]\s*)?(?:\d+\s*[мm]\s*)?)\s*(\d{3,6})\b', text_clean)
+                        if price_match:
+                            price = float(price_match.group(1))
+                        else:
+                            for l in lines:
+                                cl = re.sub(r"[^\d]", "", l)
+                                if cl and 100 <= int(cl) <= 500000:
+                                    price = float(cl)
+                                    break
+
+                        if not order_id:
+                            import hashlib
+                            order_id = hashlib.md5(f"{title}_{price}".encode()).hexdigest()[:12]
+
+                        if order_id in seen_ids:
+                            continue
+                        seen_ids.add(order_id)
+
+                        orders.append(WorkzillaOrder(
+                            order_id=order_id,
+                            title=title,
+                            description=description,
+                            price=price,
+                            raw_element=card_el
+                        ))
+                    except Exception as card_err:
+                        log.debug(f"Ошибка парсинга отдельной карточки: {card_err}")
                         continue
 
-            for card_el in card_elements:
-                try:
-                    raw_text = await card_el.inner_text()
-                    text_clean = raw_text.replace("\xa0", " ").replace("&nbsp;", " ")
-                    lines = [l.strip() for l in text_clean.split("\n") if l.strip()]
+            except Exception as e:
+                log.error(f"[red]Ошибка при сканировании заказов со страницы: {e}[/red]")
 
-                    # Пропускаем заголовки секций "Интересные задания" и "Новые задания"
-                    if not lines or lines[0] in ("Интересные задания", "Новые задания", "Выбрать всё"):
-                        continue
-
-                    title = lines[0]
-                    # Дедупликация вложенных родительских блоков
-                    if title in seen_titles:
-                        continue
-                    seen_titles.add(title)
-
-                    description = "\n".join(lines[1:]) if len(lines) > 1 else ""
-
-                    # Поиск ID заказа
-                    order_id = await card_el.get_attribute("data-order-id") or await card_el.get_attribute("id")
-                    if not order_id:
-                        link_el = await card_el.query_selector("a[href*='/order/'], a[href*='/task/'], a[href*='/vacancy/']")
-                        if link_el:
-                            href = await link_el.get_attribute("href") or ""
-                            m = re.search(r"/(?:order|task|vacancy)/([0-9a-zA-Z_-]+)", href)
-                            if m:
-                                order_id = m.group(1)
-
-                    # Парсинг цены (число рядом с таймером '6ч 0м 1000' или отдельная строка числа)
-                    price = 0.0
-                    price_match = re.search(r'(?:(?:\d+\s*[дd]\s*)?(?:\d+\s*[чh]\s*)?(?:\d+\s*[мm]\s*)?)\s*(\d{3,6})\b', text_clean)
-                    if price_match:
-                        price = float(price_match.group(1))
-                    else:
-                        for l in lines:
-                            cl = re.sub(r"[^\d]", "", l)
-                            if cl and 100 <= int(cl) <= 500000:
-                                price = float(cl)
-                                break
-
-                    if not order_id:
-                        import hashlib
-                        order_id = hashlib.md5(f"{title}_{price}".encode()).hexdigest()[:12]
-
-                    if order_id in seen_ids:
-                        continue
-                    seen_ids.add(order_id)
-
-                    orders.append(WorkzillaOrder(
-                        order_id=order_id,
-                        title=title,
-                        description=description,
-                        price=price,
-                        raw_element=card_el
-                    ))
-                except Exception as card_err:
-                    log.debug(f"Ошибка парсинга отдельной карточки: {card_err}")
-                    continue
-
-        except Exception as e:
-            log.error(f"[red]Ошибка при сканировании заказов со страницы: {e}[/red]")
-
-        return orders
+            return orders
 
     async def hide_order(self, order: WorkzillaOrder) -> bool:
         """Скрыть заказ в интерфейсе Work-zilla (удалить из ленты)."""
-        if not self.page or not order.raw_element:
+        if not self.page:
             return False
 
-        try:
-            # 1. Поиск прямой кнопки/иконки "Скрыть" или крестика
-            hide_btn = await order.raw_element.query_selector(
-                "button[title*='Скрыть'], button:has-text('Скрыть'), [class*='hide'], [class*='dismiss'], [class*='close']"
-            )
-            if hide_btn:
-                await hide_btn.click()
-                log.info(f"[dim]Заказ #{order.order_id} скрыт из ленты на сайте.[/dim]")
-                return True
+        async with self.lock:
+            if not await self._ensure_element(order):
+                return False
 
-            # 2. Наведение мыши (на Work-zilla при hover появляется крестик)
             try:
-                await order.raw_element.hover()
-                await asyncio.sleep(0.3)
-                hover_btn = await order.raw_element.query_selector(
-                    "button[title*='Скрыть'], button:has-text('Скрыть'), [class*='close'], svg[class*='close'], [class*='remove']"
+                # 1. Поиск прямой кнопки/иконки "Скрыть" или крестика
+                hide_btn = await order.raw_element.query_selector(
+                    "button[title*='Скрыть'], button:has-text('Скрыть'), [class*='hide'], [class*='dismiss'], [class*='close']"
                 )
-                if hover_btn:
-                    await hover_btn.click()
-                    log.info(f"[dim]Заказ #{order.order_id} скрыт через hover на сайте.[/dim]")
+                if hide_btn:
+                    await hide_btn.click()
+                    log.info(f"[dim]Заказ #{order.order_id} скрыт из ленты на сайте.[/dim]")
                     return True
-            except Exception:
-                pass
 
-            # 3. Через чекбокс карточки
-            cb = await order.raw_element.query_selector("input[type='checkbox'], [role='checkbox']")
-            if cb:
-                await cb.click()
-                await asyncio.sleep(0.3)
-                action_hide = await self.page.query_selector("button:has-text('Скрыть'), a:has-text('Скрыть')")
-                if action_hide:
-                    await action_hide.click()
-                    log.info(f"[dim]Заказ #{order.order_id} скрыт через чекбокс на сайте.[/dim]")
-                    return True
-                else:
+                # 2. Наведение мыши (на Work-zilla при hover появляется крестик)
+                try:
+                    await order.raw_element.hover()
+                    await asyncio.sleep(0.3)
+                    hover_btn = await order.raw_element.query_selector(
+                        "button[title*='Скрыть'], button:has-text('Скрыть'), [class*='close'], svg[class*='close'], [class*='remove']"
+                    )
+                    if hover_btn:
+                        await hover_btn.click()
+                        log.info(f"[dim]Заказ #{order.order_id} скрыт через hover на сайте.[/dim]")
+                        return True
+                except Exception:
+                    pass
+
+                # 3. Через чекбокс карточки
+                cb = await order.raw_element.query_selector("input[type='checkbox'], [role='checkbox']")
+                if cb:
                     await cb.click()
+                    await asyncio.sleep(0.3)
+                    action_hide = await self.page.query_selector("button:has-text('Скрыть'), a:has-text('Скрыть')")
+                    if action_hide:
+                        await action_hide.click()
+                        log.info(f"[dim]Заказ #{order.order_id} скрыт через чекбокс на сайте.[/dim]")
+                        return True
+                    else:
+                        await cb.click()
 
-            return False
-        except Exception as e:
-            log.debug(f"Не удалось скрыть заказ #{order.order_id}: {e}")
-            return False
+                return False
+            except Exception as e:
+                log.debug(f"Не удалось скрыть заказ #{order.order_id}: {e}")
+                return False
 
     async def apply_order(self, order: WorkzillaOrder, proposal_text: str, dry_run: bool = True) -> bool:
         """Откликнуться на заказ с сопроводительным письмом."""
@@ -284,57 +318,63 @@ class WorkzillaBrowserClient:
             log.info(f"[italic]Текст отклика:[/italic] {proposal_text}")
             return True
 
-        if not self.page or not order.raw_element:
+        if not self.page:
             return False
 
-        try:
-            # В Work-zilla кнопка 'Откликнуться' появляется при клике по карточке заказа
-            apply_btn = await order.raw_element.query_selector(
-                "button:has-text('Откликнуться'), button:has-text('Подать заявку'), a:has-text('Откликнуться')"
-            )
-            if not apply_btn:
-                # Кликаем по карточке, чтобы открыть детали задания
-                title_el = await order.raw_element.query_selector("h1, h2, h3, h4, a, [class*='title'], [class*='name']")
-                if title_el:
-                    await title_el.click()
-                else:
-                    await order.raw_element.click()
-                await asyncio.sleep(1.5)
+        async with self.lock:
+            if not await self._ensure_element(order):
+                log.error(f"[red]Карточка заказа #{order.order_id} не найдена на странице для отклика.[/red]")
+                return False
 
-                # Ищем кнопку "Откликнуться" в открывшемся окне/панели
-                apply_btn = await self.page.query_selector(
+            try:
+                # В Work-zilla кнопка 'Откликнуться' появляется при клике по карточке заказа
+                apply_btn = await order.raw_element.query_selector(
                     "button:has-text('Откликнуться'), button:has-text('Подать заявку'), a:has-text('Откликнуться')"
                 )
+                if not apply_btn:
+                    # Кликаем по карточке, чтобы открыть детали задания
+                    title_el = await order.raw_element.query_selector("h1, h2, h3, h4, a, [class*='title'], [class*='name']")
+                    if title_el:
+                        await title_el.click()
+                    else:
+                        await order.raw_element.click()
+                    await asyncio.sleep(1.5)
 
-            if not apply_btn:
-                log.warning(f"[yellow]Кнопка 'Откликнуться' не найдена для #{order.order_id}[/yellow]")
+                    # Ищем кнопку "Откликнуться" в открывшемся окне/панели
+                    apply_btn = await self.page.query_selector(
+                        "button:has-text('Откликнуться'), button:has-text('Подать заявку'), a:has-text('Откликнуться')"
+                    )
+
+                if not apply_btn:
+                    log.warning(f"[yellow]Кнопка 'Откликнуться' не найдена для #{order.order_id}[/yellow]")
+                    return False
+
+                await apply_btn.click()
+                await asyncio.sleep(1.0)
+
+                # Поле ввода комментария
+                textarea = await self.page.query_selector("textarea[placeholder*='комментарий'], textarea[placeholder*='сообщение'], textarea")
+                if not textarea:
+                    log.error(f"[red]Поле ввода отклика не найдено для #{order.order_id}[/red]")
+                    return False
+
+                # Человекоподобный ввод текста
+                await textarea.fill(proposal_text)
+                await asyncio.sleep(1.5)
+
+                # Кнопка подтверждения отправки
+                submit_btn = await self.page.query_selector(
+                    "button:has-text('Отправить'), button:has-text('Подтвердить'), button:has-text('Согласен')"
+                )
+                if submit_btn:
+                    await submit_btn.click()
+                    log.info(f"[green]Успешно отправлен отклик на заказ #{order.order_id}![/green]")
+                    return True
+                else:
+                    log.warning("[yellow]Кнопка подтверждения отправки отклика не найдена.[/yellow]")
+                    return False
+
+            except Exception as e:
+                log.error(f"[red]Ошибка при отправке отклика на #{order.order_id}: {e}[/red]")
                 return False
 
-            await apply_btn.click()
-            await asyncio.sleep(1.0)
-
-            # Поле ввода комментария
-            textarea = await self.page.query_selector("textarea[placeholder*='комментарий'], textarea[placeholder*='сообщение'], textarea")
-            if not textarea:
-                log.error(f"[red]Поле ввода отклика не найдено для #{order.order_id}[/red]")
-                return False
-
-            # Человекоподобный ввод текста
-            await textarea.fill(proposal_text)
-            await asyncio.sleep(1.5)
-
-            # Кнопка подтверждения отправки
-            submit_btn = await self.page.query_selector(
-                "button:has-text('Отправить'), button:has-text('Подтвердить'), button:has-text('Согласен')"
-            )
-            if submit_btn:
-                await submit_btn.click()
-                log.info(f"[green]Успешно отправлен отклик на заказ #{order.order_id}![/green]")
-                return True
-            else:
-                log.warning("[yellow]Кнопка подтверждения отправки отклика не найдена.[/yellow]")
-                return False
-
-        except Exception as e:
-            log.error(f"[red]Ошибка при отправке отклика на #{order.order_id}: {e}[/red]")
-            return False

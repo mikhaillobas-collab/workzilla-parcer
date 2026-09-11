@@ -31,11 +31,17 @@ class DelaysConfig(BaseModel):
 class DatabaseConfig(BaseModel):
     path: str = "data/workzilla.db"
 
+class TelegramConfig(BaseModel):
+    bot_token: str = ""
+    chat_id: int = 0
+    order_timeout_minutes: int = 15
+
 class AppConfig(BaseModel):
     gemini: GeminiConfig = Field(default_factory=GeminiConfig)
     filters: FiltersConfig = Field(default_factory=FiltersConfig)
     delays: DelaysConfig = Field(default_factory=DelaysConfig)
     database: DatabaseConfig = Field(default_factory=DatabaseConfig)
+    telegram: TelegramConfig = Field(default_factory=TelegramConfig)
 
     # Переменные из окружения (.env / BotHost)
     gemini_api_key: str = ""
@@ -76,6 +82,20 @@ def load_config() -> AppConfig:
 
     dry_run_str = os.getenv("DRY_RUN", "true").strip().lower()
     config.dry_run = dry_run_str in ("1", "true", "yes", "y")
+
+    # Telegram интеграция
+    if os.getenv("TELEGRAM_BOT_TOKEN"):
+        config.telegram.bot_token = os.getenv("TELEGRAM_BOT_TOKEN").strip()
+    if os.getenv("TELEGRAM_CHAT_ID"):
+        try:
+            config.telegram.chat_id = int(os.getenv("TELEGRAM_CHAT_ID").strip())
+        except ValueError:
+            pass
+    if os.getenv("ORDER_TIMEOUT_MINUTES"):
+        try:
+            config.telegram.order_timeout_minutes = int(os.getenv("ORDER_TIMEOUT_MINUTES").strip())
+        except ValueError:
+            pass
 
     # Переопределения фильтров из окружения (для хостинга)
     if os.getenv("MIN_PRICE"):

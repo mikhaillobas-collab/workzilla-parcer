@@ -8,13 +8,14 @@ from src.config import load_config
 from src.database import OrderDatabase
 from src.llm_evaluator import GeminiEvaluator
 from src.browser_client import WorkzillaBrowserClient
+from src.telegram_bot import TelegramBotHandler
 from src.order_manager import OrderManager
 from src.logger import log, console
 
 async def main():
     config = load_config()
 
-    # Красивая информационная панель при запуске
+    # Информационная панель при запуске
     table = Table(title="[bold green]Параметры запуска Work-zilla AI Agent[/bold green]", show_header=True)
     table.add_column("Параметр", style="cyan")
     table.add_column("Значение", style="magenta")
@@ -26,6 +27,9 @@ async def main():
     table.add_row("Минимальная цена заказа", f"{config.filters.min_price} руб.")
     table.add_row("Лимит символов отклика", str(config.filters.max_proposal_chars))
     table.add_row("Скрытие неподходящих", str(config.filters.hide_rejected_on_site))
+    table.add_row("Telegram Bot", "[green]ПОДКЛЮЧЕН[/green]" if config.telegram.bot_token else "[yellow]ОТКЛЮЧЕН (токен не задан)[/yellow]")
+    table.add_row("Telegram Chat ID", str(config.telegram.chat_id) if config.telegram.chat_id else "[yellow]Не задан (отправьте /start боту)[/yellow]")
+    table.add_row("Таймаут согласования", f"{config.telegram.order_timeout_minutes} мин.")
     table.add_row("Загружено стоп-слов", str(len(config.stop_words)))
     table.add_row("База данных SQLite", config.database.path)
 
@@ -38,6 +42,7 @@ async def main():
     db = OrderDatabase(config.database.path)
     evaluator = GeminiEvaluator(config)
     browser = WorkzillaBrowserClient(config)
+    telegram_bot = TelegramBotHandler(config=config, db=db, browser=browser)
 
     log.info("[cyan]Инициализация браузера...[/cyan]")
     connected = await browser.start()
@@ -45,7 +50,33 @@ async def main():
         log.error("[bold red]Не удалось запустить браузер. Завершение работы.[/bold red]")
         return
 
-    manager = OrderManager(config=config, db=db, evaluator=evaluator, browser=browser)
+    # Запуск фонового polling Telegram бота
+    bot_task = None
+    if config.telegram.bot_token:
+        bot_task = asyncio.create_task(telegram_bot.start_polling())
+        if telegram_bot.is_ready():
+            try:
+                mode_info = " (режим DRY-RUN)" if config.dry_run else " (БОЕВОЙ режим)"
+                await telegram_bot.bot.send_message(
+                    chat_id=config.telegram.chat_id,
+                    text=(
+                        f"🚀 <b>Work-zilla AI Agent запущен!</b>{mode_info}\n\n"
+                        f"• Мин. цена: <code>{config.filters.min_price} руб.</code>\n"
+                        f"• Таймаут отклика: <code>{config.telegram.order_timeout_minutes} мин.</code>\n"
+                        f"• Модель: <code>{config.gemini.model}</code>\n\n"
+                        f"Ожидайте карточки подходящих заказов для согласования."
+                    )
+                )
+            except Exception as tg_err:
+                log.warning(f"[yellow]Не удалось отправить приветственное сообщение в Telegram: {tg_err}[/yellow]")
+
+    manager = OrderManager(
+        config=config,
+        db=db,
+        evaluator=evaluator,
+        browser=browser,
+        telegram_bot=telegram_bot,
+    )
 
     log.info("[bold green]Система мониторинга Work-zilla успешно запущена! Нажмите Ctrl+C для выхода.[/bold green]")
 
@@ -73,7 +104,14 @@ async def main():
     except (KeyboardInterrupt, SystemExit):
         log.info("[yellow]Прерывание с клавиатуры.[/yellow]")
     finally:
-        log.info("[cyan]Закрытие браузера и сохранение данных...[/cyan]")
+        log.info("[cyan]Остановка Telegram-бота и браузера...[/cyan]")
+        if bot_task:
+            await telegram_bot.stop()
+            bot_task.cancel()
+            try:
+                await bot_task
+            except (asyncio.CancelledError, Exception):
+                pass
         await browser.close()
         log.info("[green]Работа завершена корректно.[/green]")
 
@@ -82,3 +120,4 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         pass
+
