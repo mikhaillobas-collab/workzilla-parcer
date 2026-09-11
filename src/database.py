@@ -38,6 +38,8 @@ class OrderDatabase:
                 );
             """)
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status);")
+            # Очищаем временные сбои API 404, чтобы при обновлении модели заказы пошли в Gemini 3.6 Flash
+            cursor.execute("DELETE FROM orders WHERE llm_reason LIKE '%API Error%' OR status = 'REJECTED_LOW_PRICE';")
             conn.commit()
 
     def order_exists(self, order_id: str) -> bool:

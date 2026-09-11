@@ -236,14 +236,42 @@ class WorkzillaBrowserClient:
             return False
 
         try:
-            # Ищем кнопку "Скрыть" или иконку крестика в карточке
+            # 1. Поиск прямой кнопки/иконки "Скрыть" или крестика
             hide_btn = await order.raw_element.query_selector(
                 "button[title*='Скрыть'], button:has-text('Скрыть'), [class*='hide'], [class*='dismiss'], [class*='close']"
             )
             if hide_btn:
                 await hide_btn.click()
-                log.info(f"[dim]Заказ #{order.order_id} скрыт из ленты.[/dim]")
+                log.info(f"[dim]Заказ #{order.order_id} скрыт из ленты на сайте.[/dim]")
                 return True
+
+            # 2. Наведение мыши (на Work-zilla при hover появляется крестик)
+            try:
+                await order.raw_element.hover()
+                await asyncio.sleep(0.3)
+                hover_btn = await order.raw_element.query_selector(
+                    "button[title*='Скрыть'], button:has-text('Скрыть'), [class*='close'], svg[class*='close'], [class*='remove']"
+                )
+                if hover_btn:
+                    await hover_btn.click()
+                    log.info(f"[dim]Заказ #{order.order_id} скрыт через hover на сайте.[/dim]")
+                    return True
+            except Exception:
+                pass
+
+            # 3. Через чекбокс карточки
+            cb = await order.raw_element.query_selector("input[type='checkbox'], [role='checkbox']")
+            if cb:
+                await cb.click()
+                await asyncio.sleep(0.3)
+                action_hide = await self.page.query_selector("button:has-text('Скрыть'), a:has-text('Скрыть')")
+                if action_hide:
+                    await action_hide.click()
+                    log.info(f"[dim]Заказ #{order.order_id} скрыт через чекбокс на сайте.[/dim]")
+                    return True
+                else:
+                    await cb.click()
+
             return False
         except Exception as e:
             log.debug(f"Не удалось скрыть заказ #{order.order_id}: {e}")
