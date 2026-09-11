@@ -127,60 +127,92 @@ class WorkzillaBrowserClient:
             await self.playwright.stop()
             self._is_connected = False
 
+    async def ensure_new_tab_active(self):
+        """Гарантирует, что открыт именно подраздел 'Новые', а не 'Открытые' или 'История'."""
+        if not self.page:
+            return
+        try:
+            # Ищем переключатель вкладки "Новые"
+            new_tab = await self.page.query_selector(
+                "button:has-text('Новые'), a:has-text('Новые'), div[role='tab']:has-text('Новые'), [class*='tab']:has-text('Новые')"
+            )
+            if new_tab:
+                class_name = (await new_tab.get_attribute("class") or "").lower()
+                aria_sel = (await new_tab.get_attribute("aria-selected") or "").lower()
+                if "active" not in class_name and aria_sel != "true":
+                    log.info("[cyan]Переключение на вкладку 'Новые'...[/cyan]")
+                    await new_tab.click()
+                    await asyncio.sleep(1.5)
+        except Exception as e:
+            log.debug(f"Ошибка при проверке вкладки 'Новые': {e}")
+
     async def fetch_orders(self) -> List[WorkzillaOrder]:
         """Парсинг карточек новых заказов из ленты /freelancer."""
         if not self.page:
             return []
 
+        # Гарантируем, что активен раздел "Новые"
+        await self.ensure_new_tab_active()
+
         orders: List[WorkzillaOrder] = []
+        seen_ids = set()
 
         try:
-            # Селекторы карточек заказов в SPA Work-zilla
-            # Ищем элементы с атрибутами заказа или классы списка вакансий
-            order_cards = await self.page.query_selector_all(".order-card, .vacancy-item, [data-order-id], [class*='order_card'], [class*='OrderItem']")
+            # Каждый новый доступный заказ содержит уникальную кнопку "Откликнуться"
+            apply_buttons = await self.page.query_selector_all(
+                "button:has-text('Откликнуться'), a:has-text('Откликнуться'), button:has-text('Подать заявку')"
+            )
 
-            if not order_cards:
-                # Если специфичные классы изменились, ищем контейнеры с кнопками "Откликнуться"
-                order_cards = await self.page.query_selector_all("div:has(button:has-text('Откликнуться')), div:has(button:has-text('Подать заявку'))")
-
-            for card in order_cards:
+            for btn in apply_buttons:
                 try:
-                    # Извлечение ID
-                    order_id = await card.get_attribute("data-order-id") or await card.get_attribute("id")
+                    # Находим родительский контейнер карточки
+                    card = await btn.evaluate_handle(
+                        "el => el.closest('[data-order-id]') || el.closest('.order-card') || el.closest('[class*=\"order\"]') || el.closest('[class*=\"vacancy\"]') || el.closest('article') || el.closest('li') || el.parentElement.parentElement"
+                    )
+                    card_el = card.as_element()
+                    if not card_el:
+                        continue
+
+                    raw_text = await card_el.inner_text()
+                    # Заменяем неразрывные пробелы \xa0 и &nbsp;
+                    text_clean = raw_text.replace("\xa0", " ").replace("&nbsp;", " ")
+                    lines = [l.strip() for l in text_clean.split("\n") if l.strip()]
+
+                    title = lines[0] if lines else "Без заголовка"
+                    description = "\n".join(lines[1:]) if len(lines) > 1 else ""
+
+                    # Поиск ID заказа
+                    order_id = await card_el.get_attribute("data-order-id") or await card_el.get_attribute("id")
                     if not order_id:
-                        # Поиск ссылки на заказ /order/12345
-                        link_el = await card.query_selector("a[href*='/order/']")
+                        link_el = await card_el.query_selector("a[href*='/order/']")
                         if link_el:
                             href = await link_el.get_attribute("href") or ""
                             m = re.search(r"/order/([0-9a-zA-Z_-]+)", href)
                             if m:
                                 order_id = m.group(1)
 
-                    # Извлечение заголовка и описания
-                    text_content = await card.inner_text()
-                    lines = [l.strip() for l in text_content.split("\n") if l.strip()]
-
-                    title = lines[0] if lines else "Без заголовка"
-                    description = "\n".join(lines[1:]) if len(lines) > 1 else ""
-
-                    # Извлечение цены (поиск шаблона "1000 ₽" или "1000 руб")
+                    # Парсинг цены (учитываем пробелы между тысячами, например "1 500 ₽" или "1000 руб")
                     price = 0.0
-                    price_match = re.search(r"(\d[\d\s]*)\s*(?:₽|руб|Р)", text_content, re.IGNORECASE)
+                    price_match = re.search(r"(\d[\d\s]{0,8})\s*(?:₽|руб\.?|р\.?)", text_clean, re.IGNORECASE)
                     if price_match:
-                        clean_price_str = price_match.group(1).replace(" ", "")
-                        price = float(clean_price_str)
+                        clean_price_str = re.sub(r"[^\d]", "", price_match.group(1))
+                        if clean_price_str:
+                            price = float(clean_price_str)
 
-                    # Если id так и не найден, генерируем хеш из заголовка и цены
                     if not order_id:
                         import hashlib
                         order_id = hashlib.md5(f"{title}_{price}".encode()).hexdigest()[:12]
+
+                    if order_id in seen_ids:
+                        continue
+                    seen_ids.add(order_id)
 
                     orders.append(WorkzillaOrder(
                         order_id=order_id,
                         title=title,
                         description=description,
                         price=price,
-                        raw_element=card
+                        raw_element=card_el
                     ))
                 except Exception as card_err:
                     log.debug(f"Ошибка парсинга отдельной карточки: {card_err}")
