@@ -1,5 +1,7 @@
 import asyncio
 import re
+import sys
+import subprocess
 from typing import List, Dict, Any, Optional
 from playwright.async_api import async_playwright, BrowserContext, Page, ElementHandle
 from src.config import AppConfig
@@ -60,12 +62,34 @@ class WorkzillaBrowserClient:
         else:
             log.info(f"[cyan]Запуск Playwright в режиме persistent context (headless={self.config.headless})...[/cyan]")
             user_data_dir = "data/browser_profile"
-            self.context = await self.playwright.chromium.launch_persistent_context(
-                user_data_dir=user_data_dir,
-                headless=self.config.headless,
-                viewport={"width": 1280, "height": 800},
-                args=["--disable-blink-features=AutomationControlled", "--no-sandbox"]
-            )
+            try:
+                self.context = await self.playwright.chromium.launch_persistent_context(
+                    user_data_dir=user_data_dir,
+                    headless=self.config.headless,
+                    viewport={"width": 1280, "height": 800},
+                    args=["--disable-blink-features=AutomationControlled", "--no-sandbox"]
+                )
+            except Exception as e:
+                err_text = str(e)
+                if "Executable doesn't exist" in err_text or "playwright install" in err_text:
+                    log.warning("[yellow]Бинарные файлы Chromium не найдены. Выполняю автоматическую установку Playwright Chromium...[/yellow]")
+                    try:
+                        # Установка chromium
+                        subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"], check=True)
+                        log.info("[green]Chromium успешно установлен. Повторный запуск...[/green]")
+                    except Exception as install_err:
+                        log.error(f"[red]Ошибка при установке Chromium: {install_err}[/red]")
+                        raise e
+
+                    # Повторная попытка после установки
+                    self.context = await self.playwright.chromium.launch_persistent_context(
+                        user_data_dir=user_data_dir,
+                        headless=self.config.headless,
+                        viewport={"width": 1280, "height": 800},
+                        args=["--disable-blink-features=AutomationControlled", "--no-sandbox"]
+                    )
+                else:
+                    raise e
             
             # Если переданы куки через переменную окружения (актуально для серверов/BotHost)
             if self.config.workzilla_cookies:
