@@ -37,11 +37,13 @@ class AppConfig(BaseModel):
     delays: DelaysConfig = Field(default_factory=DelaysConfig)
     database: DatabaseConfig = Field(default_factory=DatabaseConfig)
 
-    # Переменные из окружения (.env)
+    # Переменные из окружения (.env / BotHost)
     gemini_api_key: str = ""
     proxy_url: Optional[str] = None
     browser_mode: str = "cdp"
     cdp_url: str = "http://127.0.0.1:9222"
+    headless: bool = True
+    workzilla_cookies: Optional[str] = None
     dry_run: bool = True
 
     # Список стоп-слов
@@ -65,8 +67,25 @@ def load_config() -> AppConfig:
     config.browser_mode = os.getenv("BROWSER_MODE", "cdp").strip().lower()
     config.cdp_url = os.getenv("CDP_URL", "http://127.0.0.1:9222").strip()
     
+    headless_str = os.getenv("HEADLESS", "true").strip().lower()
+    config.headless = headless_str in ("1", "true", "yes", "y")
+    
+    config.workzilla_cookies = os.getenv("WORKZILLA_COOKIES", "").strip() or None
+
     dry_run_str = os.getenv("DRY_RUN", "true").strip().lower()
     config.dry_run = dry_run_str in ("1", "true", "yes", "y")
+
+    # Переопределения фильтров из окружения (для хостинга)
+    if os.getenv("MIN_PRICE"):
+        try:
+            config.filters.min_price = int(os.getenv("MIN_PRICE"))
+        except ValueError:
+            pass
+    if os.getenv("MAX_PROPOSAL_CHARS"):
+        try:
+            config.filters.max_proposal_chars = int(os.getenv("MAX_PROPOSAL_CHARS"))
+        except ValueError:
+            pass
 
     # Чтение стоп-слов
     stop_words_file = BASE_DIR / "config" / "stop_words.txt"

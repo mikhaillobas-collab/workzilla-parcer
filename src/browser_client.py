@@ -58,14 +58,40 @@ class WorkzillaBrowserClient:
                 log.info("[yellow]Подсказка: запустите Chrome с флагом --remote-debugging-port=9222[/yellow]")
                 return False
         else:
-            log.info("[cyan]Запуск Playwright в режиме persistent context...[/cyan]")
+            log.info(f"[cyan]Запуск Playwright в режиме persistent context (headless={self.config.headless})...[/cyan]")
             user_data_dir = "data/browser_profile"
             self.context = await self.playwright.chromium.launch_persistent_context(
                 user_data_dir=user_data_dir,
-                headless=False,
+                headless=self.config.headless,
                 viewport={"width": 1280, "height": 800},
-                args=["--disable-blink-features=AutomationControlled"]
+                args=["--disable-blink-features=AutomationControlled", "--no-sandbox"]
             )
+            
+            # Если переданы куки через переменную окружения (актуально для серверов/BotHost)
+            if self.config.workzilla_cookies:
+                try:
+                    import json
+                    cookies_data = []
+                    raw = self.config.workzilla_cookies.strip()
+                    if raw.startswith("[") and raw.endswith("]"):
+                        cookies_data = json.loads(raw)
+                    else:
+                        # Формат cookie header "name1=val1; name2=val2"
+                        for item in raw.split(";"):
+                            if "=" in item:
+                                k, v = item.strip().split("=", 1)
+                                cookies_data.append({
+                                    "name": k.strip(),
+                                    "value": v.strip(),
+                                    "domain": ".work-zilla.com",
+                                    "path": "/"
+                                })
+                    if cookies_data:
+                        await self.context.add_cookies(cookies_data)
+                        log.info(f"[green]Успешно загружено куки Work-zilla ({len(cookies_data)} шт.)[/green]")
+                except Exception as e:
+                    log.error(f"[red]Ошибка при парсинге WORKZILLA_COOKIES: {e}[/red]")
+
             self.page = self.context.pages[0] if self.context.pages else await self.context.new_page()
             await self.page.goto("https://client.work-zilla.com/freelancer")
             self._is_connected = True
