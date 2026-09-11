@@ -1,0 +1,31 @@
+# Конфигурация парсера и авто-откликщика Work-zilla
+
+gemini:
+  model: "gemini-2.5-flash"
+  temperature: 0.3
+  max_tokens: 600
+  timeout_seconds: 30
+
+filters:
+  # Минимальная цена заказа (в рублях)
+  min_price: 150
+  
+  # Максимальное число символов в сопроводительном отклике
+  max_proposal_chars: 320
+  
+  # Автоматически скрывать неподходящие заказы на сайте Work-zilla
+  hide_rejected_on_site: true
+  
+  # Минимальный порог уверенности модели (0.0 - 1.0)
+  min_confidence: 0.75
+
+delays:
+  # Задержка перед отправкой отклика (защита от антифрода биржи)
+  min_apply_delay_sec: 15
+  max_apply_delay_sec: 45
+  
+  # Интервал проверки новых заказов в ленте (секунды)
+  poll_interval_sec: 10
+
+database:
+  path: "data/workzilla.db"

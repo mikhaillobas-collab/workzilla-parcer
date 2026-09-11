@@ -1,0 +1,31 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environments and Secrets
+.env
+.venv/
+env/
+venv/
+ENV/
+
+# Data and SQLite databases
+data/
+*.db
+*.sqlite3
+
+# Playwright and Browser user data
+browser_profile/
+.playwright/
+
+# IDE and Editor
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS files
+Thumbs.db
+Desktop.ini
+.DS_Store
