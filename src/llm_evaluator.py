@@ -19,7 +19,7 @@ class EvaluationResult(BaseModel):
 class GeminiEvaluator:
     """Оценщик заказов на базе Google Gemini с поддержкой Proxy и retry."""
 
-    FALLBACK_MODELS = ["gemini-2.0-flash", "gemini-1.5-flash"]
+    FALLBACK_MODELS = ["gemini-3.5-flash", "gemini-3.6-flash"]
 
     SYSTEM_PROMPT = """Ты — строгий эксперт по оценке задач для фрилансера.
 Твоя цель — определить, может ли предложенная задача быть выполнена ИСКЛЮЧИТЕЛЬНО силами языковой модели (LLM) онлайн, без любого ручного участия человека, без оффлайна и без использования личных аккаунтов.

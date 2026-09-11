@@ -12,7 +12,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BASE_DIR / ".env")
 
 class GeminiConfig(BaseModel):
-    model: str = "gemini-2.0-flash"
+    model: str = "gemini-3.5-flash"
     temperature: float = 0.3
     max_tokens: int = 600
     timeout_seconds: int = 30
