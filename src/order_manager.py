@@ -105,6 +105,17 @@ class OrderManager:
         log.info(f"[bold]Вердикт LLM:[/bold] Feasible={eval_result.feasible} (Confidence: {eval_result.confidence})")
         log.info(f"[bold]Причина:[/bold] {eval_result.reason}")
 
+        # Если произошел временный сбой API или 429 Rate Limit — НЕ бракуем заказ и НЕ скрываем его
+        if eval_result.is_api_error:
+            log.warning(
+                f"[yellow]Заказ #{order.order_id} временно отложен из-за лимита API. "
+                f"Он НЕ скрывается на бирже и будет перепроверен позже.[/yellow]"
+            )
+            return
+
+        # Пауза между запросами к LLM для соблюдения RPM лимитов Google
+        await asyncio.sleep(2.0)
+
         # 5. Принятие решения
         if eval_result.feasible and eval_result.confidence >= self.config.filters.min_confidence:
             log.info(f"[bold green]>>> ЗАКАЗ ПОДХОДИТ ДЛЯ 100% LLM ВЫПОЛНЕНИЯ! <<<[/bold green]")
