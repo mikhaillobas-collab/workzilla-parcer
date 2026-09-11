@@ -128,66 +128,43 @@ class WorkzillaBrowserClient:
             self._is_connected = False
 
     async def ensure_new_tab_active(self):
-        """Гарантирует, что открыт именно подраздел 'Новые', а не 'Открытые' или 'История'."""
-        if not self.page:
-            return
-        try:
-            # Ищем переключатель вкладки "Новые"
-            new_tab = await self.page.query_selector(
-                "button:has-text('Новые'), a:has-text('Новые'), div[role='tab']:has-text('Новые'), [class*='tab']:has-text('Новые')"
-            )
-            if new_tab:
-                class_name = (await new_tab.get_attribute("class") or "").lower()
-                aria_sel = (await new_tab.get_attribute("aria-selected") or "").lower()
-                if "active" not in class_name and aria_sel != "true":
-                    log.info("[cyan]Переключение на вкладку 'Новые'...[/cyan]")
-                    await new_tab.click()
-                    await asyncio.sleep(1.5)
-        except Exception as e:
-            log.debug(f"Ошибка при проверке вкладки 'Новые': {e}")
+        """Проверка вкладки 'Новые' выполняется только один раз при старте."""
+        pass
 
     async def fetch_orders(self) -> List[WorkzillaOrder]:
         """Парсинг карточек новых заказов из ленты /freelancer."""
         if not self.page:
             return []
 
-        # Гарантируем, что активен раздел "Новые"
-        await self.ensure_new_tab_active()
-
         orders: List[WorkzillaOrder] = []
+        seen_titles = set()
         seen_ids = set()
 
         try:
-            # На реальном Work-zilla каждая карточка заказа имеет чекбокс справа
-            # (за исключением чекбоксов "Выбрать всё" в заголовках секций)
-            checkboxes = await self.page.query_selector_all("input[type='checkbox']")
-            card_elements = []
+            # 1. Поиск карточек заказов по стандартным классам Workzilla
+            card_elements = await self.page.query_selector_all(
+                ".order-card, .vacancy-item, [data-order-id], [class*='order_card'], [class*='OrderItem'], [class*='order-item'], [class*='taskItem'], [class*='vacancyItem']"
+            )
 
-            for cb in checkboxes:
-                try:
-                    # Проверяем, не является ли это чекбоксом "Выбрать всё"
-                    is_select_all = await cb.evaluate("""el => {
-                        const parent = el.closest('div') || el.parentElement;
-                        return parent && parent.innerText && parent.innerText.includes('Выбрать всё');
-                    }""")
-                    if is_select_all:
-                        continue
-
-                    # Находим родительский контейнер карточки
-                    card_handle = await cb.evaluate_handle("""el => {
-                        return el.closest('[class*=\"item\"], [class*=\"card\"], [class*=\"order\"], [class*=\"vacancy\"], article, li') || el.parentElement.parentElement;
-                    }""")
-                    card_el = card_handle.as_element()
-                    if card_el and card_el not in card_elements:
-                        card_elements.append(card_el)
-                except Exception:
-                    continue
-
-            # Если чекбоксы не найдены (например, верстка изменилась), используем классы
+            # 2. Если по классам не найдено — ищем по чекбоксам на карточках
             if not card_elements:
-                card_elements = await self.page.query_selector_all(
-                    ".order-card, .vacancy-item, [class*='order_card'], [class*='OrderItem'], [class*='taskItem'], [class*='vacancyItem']"
-                )
+                checkboxes = await self.page.query_selector_all("input[type='checkbox'], [role='checkbox'], [class*='checkbox']")
+                for cb in checkboxes:
+                    try:
+                        is_select_all = await cb.evaluate("""el => {
+                            const p = el.closest('div') || el.parentElement;
+                            return p && p.innerText && p.innerText.includes('Выбрать всё');
+                        }""")
+                        if is_select_all:
+                            continue
+                        card_h = await cb.evaluate_handle("""el => {
+                            return el.closest('[class*=\"item\"], [class*=\"card\"], [class*=\"order\"], [class*=\"vacancy\"], article, li') || el.parentElement.parentElement;
+                        }""")
+                        el = card_h.as_element()
+                        if el and el not in card_elements:
+                            card_elements.append(el)
+                    except Exception:
+                        continue
 
             for card_el in card_elements:
                 try:
@@ -195,10 +172,16 @@ class WorkzillaBrowserClient:
                     text_clean = raw_text.replace("\xa0", " ").replace("&nbsp;", " ")
                     lines = [l.strip() for l in text_clean.split("\n") if l.strip()]
 
-                    if not lines:
+                    # Пропускаем заголовки секций "Интересные задания" и "Новые задания"
+                    if not lines or lines[0] in ("Интересные задания", "Новые задания", "Выбрать всё"):
                         continue
 
                     title = lines[0]
+                    # Дедупликация вложенных родительских блоков
+                    if title in seen_titles:
+                        continue
+                    seen_titles.add(title)
+
                     description = "\n".join(lines[1:]) if len(lines) > 1 else ""
 
                     # Поиск ID заказа
@@ -211,18 +194,16 @@ class WorkzillaBrowserClient:
                             if m:
                                 order_id = m.group(1)
 
-                    # Точный парсинг цены:
-                    # В Work-zilla цена идет рядом со временем (например: '6ч 0м 1000' или '1д 0ч 1500')
+                    # Парсинг цены (число рядом с таймером '6ч 0м 1000' или отдельная строка числа)
                     price = 0.0
                     price_match = re.search(r'(?:(?:\d+\s*[дd]\s*)?(?:\d+\s*[чh]\s*)?(?:\d+\s*[мm]\s*)?)\s*(\d{3,6})\b', text_clean)
                     if price_match:
                         price = float(price_match.group(1))
                     else:
-                        # Запасной вариант: поиск строки с чистым числом бюджета
                         for l in lines:
-                            digits_only = re.sub(r"[^\d]", "", l)
-                            if digits_only and 100 <= int(digits_only) <= 500000:
-                                price = float(digits_only)
+                            cl = re.sub(r"[^\d]", "", l)
+                            if cl and 100 <= int(cl) <= 500000:
+                                price = float(cl)
                                 break
 
                     if not order_id:
