@@ -12,7 +12,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BASE_DIR / ".env")
 
 class GeminiConfig(BaseModel):
-    model: str = "gemini-2.5-flash"
+    model: str = "gemini-3.6-flash"
     temperature: float = 0.3
     max_tokens: int = 600
     timeout_seconds: int = 30
@@ -60,6 +60,8 @@ def load_config() -> AppConfig:
     config = AppConfig(**data)
 
     # Применение переменных из окружения
+    if os.getenv("GEMINI_MODEL"):
+        config.gemini.model = os.getenv("GEMINI_MODEL").strip()
     config.gemini_api_key = os.getenv("GEMINI_API_KEY", "").strip()
     config.proxy_url = os.getenv("PROXY_URL", None)
     if config.proxy_url:

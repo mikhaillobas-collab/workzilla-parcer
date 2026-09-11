@@ -35,9 +35,14 @@ class OrderManager:
         # 1. Проверка дедупликации
         existing = self.db.get_order(order.order_id)
         if existing:
-            # Если отклик уже отправлен, или заказ отсеян LLM или стоп-словом — пропускаем
-            if existing["status"] in ("APPLIED", "PENDING_APPLY", "REJECTED_STOPWORD", "REJECTED_LLM"):
+            # Если отклик уже отправлен или отсеян стоп-словом — пропускаем
+            if existing["status"] in ("APPLIED", "PENDING_APPLY", "REJECTED_STOPWORD"):
                 return
+            # Если отсеян LLM, но отсеян НЕ из-за сбоя API — пропускаем
+            if existing["status"] == "REJECTED_LLM":
+                reason = existing.get("llm_reason") or ""
+                if not reason.startswith("API Error"):
+                    return
             # Если ранее был отсеян по цене, и текущая цена все еще ниже порога — пропускаем
             if existing["status"] == "REJECTED_LOW_PRICE" and (order.price <= 0 or order.price < self.config.filters.min_price):
                 return
@@ -148,7 +153,12 @@ class OrderManager:
             new_count = 0
             for o in orders:
                 ext = self.db.get_order(o.order_id)
-                if not ext or (ext["status"] == "REJECTED_LOW_PRICE" and o.price >= self.config.filters.min_price):
+                is_new = (
+                    not ext 
+                    or (ext["status"] == "REJECTED_LOW_PRICE" and o.price >= self.config.filters.min_price)
+                    or (ext["status"] == "REJECTED_LLM" and (ext.get("llm_reason") or "").startswith("API Error"))
+                )
+                if is_new:
                     new_count += 1
 
             if new_count > 0:
