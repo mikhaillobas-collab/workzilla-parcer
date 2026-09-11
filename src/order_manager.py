@@ -33,8 +33,14 @@ class OrderManager:
     async def process_order(self, order: WorkzillaOrder):
         """Полный цикл обработки отдельного заказа."""
         # 1. Проверка дедупликации
-        if self.db.order_exists(order.order_id):
-            return
+        existing = self.db.get_order(order.order_id)
+        if existing:
+            # Если отклик уже отправлен, или заказ отсеян LLM или стоп-словом — пропускаем
+            if existing["status"] in ("APPLIED", "PENDING_APPLY", "REJECTED_STOPWORD", "REJECTED_LLM"):
+                return
+            # Если ранее был отсеян по цене, и текущая цена все еще ниже порога — пропускаем
+            if existing["status"] == "REJECTED_LOW_PRICE" and (order.price <= 0 or order.price < self.config.filters.min_price):
+                return
 
         log.info(f"\n[bold cyan]------------------ Новый заказ #{order.order_id} ------------------[/bold cyan]")
         log.info(f"[bold]Заголовок:[/bold] {order.title}")
@@ -42,7 +48,7 @@ class OrderManager:
 
         # 2. Проверка по минимальной цене
         if 0 < order.price < self.config.filters.min_price:
-            log.info(f"[dim yellow]Отсеян по цене ({order.price} < {self.config.filters.min_price} руб.)[/dim yellow]")
+            log.info(f"[dim yellow]Отсеян по цене ({order.price:.0f} < {self.config.filters.min_price} руб.)[/dim yellow]")
             self.db.save_order(
                 order_id=order.order_id,
                 title=order.title,
@@ -138,7 +144,18 @@ class OrderManager:
         """Один цикл сканирования и обработки заказов."""
         orders = await self.browser.fetch_orders()
         if orders:
-            log.info(f"[blue]Обнаружено заказов в ленте: {len(orders)}[/blue]")
+            # Считаем, сколько из них действительно новые (не в БД)
+            new_count = 0
+            for o in orders:
+                ext = self.db.get_order(o.order_id)
+                if not ext or (ext["status"] == "REJECTED_LOW_PRICE" and o.price >= self.config.filters.min_price):
+                    new_count += 1
+
+            if new_count > 0:
+                log.info(f"[blue]В ленте 'Новые': {len(orders)} заказов (из них новых на анализ: {new_count})[/blue]")
+            else:
+                log.info(f"[dim]В ленте 'Новые': {len(orders)} заказов (все уже проверены, ждем свежих пушей...)[/dim]")
+
             for order in orders:
                 await self.process_order(order)
         else:
