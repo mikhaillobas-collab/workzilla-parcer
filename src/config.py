@@ -30,6 +30,7 @@ class DelaysConfig(BaseModel):
 
 class DatabaseConfig(BaseModel):
     path: str = "data/workzilla.db"
+    url: Optional[str] = None
 
 class TelegramConfig(BaseModel):
     bot_token: str = ""
@@ -96,6 +97,18 @@ def load_config() -> AppConfig:
             config.telegram.order_timeout_minutes = int(os.getenv("ORDER_TIMEOUT_MINUTES").strip())
         except ValueError:
             pass
+
+    # База данных PostgreSQL (DATABASE_URL / POSTGRES_URL)
+    db_url = (
+        os.getenv("DATABASE_URL")
+        or os.getenv("POSTGRES_URL")
+        or os.getenv("PG_URL")
+    )
+    if db_url:
+        db_url = db_url.strip()
+        if db_url.startswith("postgres://"):
+            db_url = "postgresql://" + db_url[len("postgres://"):]
+        config.database.url = db_url
 
     # Переопределения фильтров из окружения (для хостинга)
     if os.getenv("MIN_PRICE"):

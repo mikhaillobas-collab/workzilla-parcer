@@ -31,7 +31,13 @@ async def main():
     table.add_row("Telegram Chat ID", str(config.telegram.chat_id) if config.telegram.chat_id else "[yellow]Не задан (отправьте /start боту)[/yellow]")
     table.add_row("Таймаут согласования", f"{config.telegram.order_timeout_minutes} мин.")
     table.add_row("Загружено стоп-слов", str(len(config.stop_words)))
-    table.add_row("База данных SQLite", config.database.path)
+
+    if config.database.url:
+        import re
+        clean_url = re.sub(r"://([^:]+):([^@]+)@", r"://\1:***@", config.database.url)
+        table.add_row("База данных", f"[green]PostgreSQL[/green] ({clean_url})")
+    else:
+        table.add_row("База данных", f"[yellow]SQLite[/yellow] ({config.database.path})")
 
     console.print(table)
 
@@ -39,7 +45,7 @@ async def main():
         log.warning("[bold yellow]Внимание: GEMINI_API_KEY не указан в .env файле![/bold yellow]")
         log.warning("[yellow]Запросы к Gemini будут отклоняться. Укажите ключ в .env перед боевым запуском.[/yellow]")
 
-    db = OrderDatabase(config.database.path)
+    db = OrderDatabase(db_path=config.database.path, db_url=config.database.url)
     evaluator = GeminiEvaluator(config)
     browser = WorkzillaBrowserClient(config)
     telegram_bot = TelegramBotHandler(config=config, db=db, browser=browser)
